@@ -1,0 +1,237 @@
+<#@ template debug="true" hostspecific="true" language="C#" #>
+<#@ output extension=".generated.cs" #>
+<#@ assembly name="System.Core" #>
+<#@ assembly name="Microsoft.VisualStudio.Shell.Interop.8.0" #>
+<#@ assembly name="EnvDTE" #>
+<#@ assembly name="EnvDTE80" #>
+<#@ assembly name="VSLangProj" #>
+<#@ import namespace="System.Linq" #>
+<#@ import namespace="System.Text" #>
+<#@ import namespace="System.Collections.Generic" #>
+<#@ import namespace="Microsoft.VisualStudio.Shell.Interop" #>
+<#@ import namespace="EnvDTE" #>
+<#@ import namespace="EnvDTE80" #>
+<#@ import namespace="Microsoft.VisualStudio.TextTemplating" #>
+using System;
+
+namespace MutatR.Core
+{
+    public class ImmutableAttribute : Attribute
+    {
+    }
+}
+
+<#
+    const string MutatRImmutableAttributeFullName = "MutatR.Core.ImmutableAttribute";
+
+    foreach(var codeNamespace in GetNamespaceElements())
+    {
+        var namespaceName = codeNamespace.FullName;
+
+        var classes = codeNamespace.Members.OfType<CodeClass>().Where(c=>!string.IsNullOrEmpty(c.Name));
+        var markedClasses = classes.Where(c=>c.Attributes.OfType<CodeAttribute>().Any(attr=>attr.FullName == MutatRImmutableAttributeFullName)).ToList();
+        if(!markedClasses.Any())
+            continue;
+
+#>
+namespace <#=namespaceName#>
+{
+<#
+        foreach(var codeClass in markedClasses)
+        {
+            var className = codeClass.Name;
+
+            var parameters = new List<Tuple<string, string>>();
+            FillParametersList(codeClass, parameters);
+#>
+    partial class <#=className#>
+    {
+        private <#=className#>(<#=BuildConstructorParametersExpression(parameters)#>)
+        {
+<#
+            foreach(var param in parameters)
+            {
+#>
+            this.<#=param.Item2#> = <#=GetParameterName(param.Item2)#>;
+<#
+            }
+#>
+        }
+
+        public MutationContext Mutate()
+        {
+            return new MutationContext(this);
+        }
+
+        public static implicit operator <#=className#>(MutationContext ctx)
+        {
+            return ctx.Commit();
+        }
+
+        public struct MutationContext
+        {
+<#
+            foreach(var param in parameters)
+            {
+#>
+            private <#=param.Item1#> <#=GetParameterName(param.Item2)#>;
+<#
+            }
+#>
+
+            public MutationContext(<#=className#> target)
+            {
+<#
+            foreach(var param in parameters)
+            {
+#>
+                this.<#=GetParameterName(param.Item2)#> = target.<#=param.Item2#>;
+<#
+            }
+#>
+            }
+
+<#
+            foreach(var param in parameters)
+            {
+#>
+            public MutationContext With<#=param.Item2#>(<#=param.Item1#> value)
+            {
+                this.<#=GetParameterName(param.Item2)#> = value;
+
+                return this;
+            }
+
+<#
+            }
+#>
+            public <#=className#> Commit()
+            {
+                return new <#=className#>(<#=BuildConstructorCallingExpression(parameters.Select(param=>param.Item2))#>);
+            }
+        }
+    }   
+<#
+        }
+#>
+}
+
+<#
+    }
+#>
+<#+
+    private static string BuildConstructorCallingExpression(IEnumerable<string> parameters)
+    {
+        return string.Join(", ", parameters.Select(param=>GetParameterName(param)));
+    }
+
+    private static string BuildConstructorParametersExpression(IEnumerable<Tuple<string, string>> parameters)
+    {
+        return string.Join(", ", parameters.Select(p=>$"{p.Item1} {GetParameterName(p.Item2)}"));
+    }
+
+    private static string GetParameterName(string memberName)
+    {
+        return char.ToLower(memberName[0]) + memberName.Substring(1);
+    }
+
+    private static void FillParametersList(CodeClass codeClass, List<Tuple<string, string>> parameters)
+    {
+        foreach(CodeElement member in codeClass.Members)
+        {
+            if(member is CodeProperty)
+            {
+                var property = (CodeProperty)member;
+                if(!IsPropertyAutoGetter(property))
+                    continue;
+
+                parameters.Add(Tuple.Create(property.Type.AsFullName, property.Name));
+            }
+            else if(member is CodeVariable2)
+            {
+                var field = (CodeVariable2)member;
+                if(!IsReadonlyField(field))
+                    continue;
+
+                parameters.Add(Tuple.Create(field.Type.AsFullName, field.Name));
+            }
+            }        
+            
+    }
+
+    private static bool IsPropertyAutoGetter(CodeProperty property)
+    {
+        var setter = property.Setter;
+        if(setter != null)
+            return false;
+
+        var getter = property.Getter;
+        try
+        {
+            var kind= getter.FunctionKind;
+            if(kind != vsCMFunction.vsCMFunctionPropertyGet)
+                return false;
+
+            var start = getter.GetStartPoint();
+            var end = getter.GetEndPoint();
+            var getterSrc = start.CreateEditPoint().GetText(end);
+            if(getterSrc.Replace(" ", "") != "get;")
+                return false;
+
+            return true;
+        }         
+        catch
+        {
+        }  
+
+        return false;           
+    }
+
+    private static bool IsReadonlyField(CodeVariable2 field)
+    {
+        var constKind = field.ConstKind;
+
+        return constKind == vsCMConstKind.vsCMConstKindReadOnly;
+    }
+
+    private IEnumerable<CodeNamespace> GetNamespaceElements()
+    {
+        var visualStudio = (Host as IServiceProvider).GetService(typeof(DTE)) as DTE;
+        var project = visualStudio.Solution.FindProjectItem(Host.TemplateFile).ContainingProject as Project;
+
+        var projItems = new List<ProjectItem>();
+        FillProjectItems(project.ProjectItems, projItems);
+
+        var names = new HashSet<string>(projItems
+            .Where(i => i.FileCodeModel != null)
+            .SelectMany(i => i.FileCodeModel.CodeElements.OfType<CodeElement>())
+            .Where(e => e.Kind == vsCMElement.vsCMElementNamespace)
+            .Select(e => e.FullName));
+
+        var codeNs = new List<CodeNamespace>();
+        FillCodeNamespaces(project.CodeModel.CodeElements.OfType<CodeNamespace>(), codeNs);
+
+        return codeNs.Where(ns => names.Contains(ns.FullName));
+    }
+
+    private void FillCodeNamespaces(IEnumerable<CodeNamespace> parents, List<CodeNamespace> all)
+    {
+        foreach (var parent in parents)
+        {
+            all.Add(parent);
+            FillCodeNamespaces(parent.Members.OfType<CodeNamespace>(), all);
+        }
+    }
+
+    private void FillProjectItems(ProjectItems items, List<ProjectItem> ret)
+    {
+        if (items == null) 
+            return;
+
+        foreach(ProjectItem item in items)
+        {
+            ret.Add(item);
+            FillProjectItems(item.ProjectItems, ret);
+        }
+    }  
+#>
