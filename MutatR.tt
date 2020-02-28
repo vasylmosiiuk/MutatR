@@ -14,15 +14,16 @@
 <#@ import namespace="Microsoft.VisualStudio.TextTemplating" #>
 using System;
 
-namespace MutatR.Core
+namespace MutatR
 {
+    [AttributeUsage(AttributeTargets.Class)]
     public class ImmutableAttribute : Attribute
     {
     }
 }
 
 <#
-    const string MutatRImmutableAttributeFullName = "MutatR.Core.ImmutableAttribute";
+    const string MutatRImmutableAttributeFullName = "MutatR.ImmutableAttribute";
 
     foreach(var codeNamespace in GetNamespaceElements())
     {
